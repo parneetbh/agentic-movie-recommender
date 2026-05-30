@@ -1,107 +1,112 @@
-# Agentic Movie Recommender
+# 🎬 Agentic Movie Recommender
 
-## Approach
+**AI-Powered Personalized Movie Recommendations via Multi-Signal Retrieval + LLM**
 
-### Candidate Retrieval (Multi-Signal Scoring)
-We build a TF-IDF index over **genres, keywords, and production countries** (not overview or title) at load time using `scikit-learn`. Excluding the overview prevents false matches — e.g. Parasite ranking #1 for "food movie" because its overview mentions a cooking scene.
+A movie recommendation agent that combines TF-IDF retrieval, multi-signal scoring, and an LLM (Gemma 4 via Ollama Cloud) to suggest the perfect film based on your mood, preferences, and watch history. Built to respond in under 20 seconds with a compelling, personalized pitch.
 
-At query time, each movie gets a combined score from four signals:
+## 🚀 How It Works
 
-1. **Keyword + country exact match** (strongest signal — 10 pts per matching word): if the user says "food", movies with "food", "chef", or "restaurant" in their keywords field are heavily boosted; if the user says "Iranian" or "Korean", production country is matched
-2. **TF-IDF cosine similarity** (3x weight): semantic match between the enriched query and genres/keywords corpus
-3. **Popularity-adjusted vote score**: `vote_average × min(vote_count / 10000, 1.0) × 0.5` — halved so mood signals dominate over raw popularity
-4. **Genre boost/penalty**:
-   - **Standard mood match**: +1.5 for matching genre (e.g. "funny" → Comedy)
-   - **Emotional query mode** (triggered by words like "cry", "sad", "heartbreaking", "grief"): +4.0 for Drama match; −5.0 penalty for Action/Western/Comedy/Horror so a tearjerker beats a blockbuster that merely carries a secondary Drama tag
-    - −3.0 for dark genres (Thriller, Crime, Horror) when a light mood is detected
-    - −10.0 hard penalty for explicitly excluded genres (e.g. "no thriller")
+### 1. Candidate Retrieval (Multi-Signal Scoring)
+A TF-IDF index is built over **genres, keywords, and production countries** at load time. Each movie is scored by four signals:
 
-**Hard Filtering**:
-- **Runtime**: Constraints like "under 90 mins" or "at least 2 hours" are parsed and applied as a hard filter.
-- **Nationality**: If a specific country is requested (e.g., "Iranian"), the pool is restricted to films from that country (fallback only if 0 results).
+- **Keyword & country exact match** — 10 pts per matching word; production country is matched separately to prevent Hollywood films shot abroad from outranking genuine national productions
+- **TF-IDF cosine similarity** — 3× weight; semantic match between the enriched query and the corpus
+- **Popularity-adjusted vote score** — `vote_average × min(vote_count / 10000, 1.0) × 0.5`, halved so mood signals dominate
+- **Genre boost/penalty** — standard mood match (+1.5), emotional tearjerker mode (+4.0 Drama, −5.0 Action/Comedy/Horror), light mood (−3.0 for dark genres), hard negation penalty (−10.0)
 
-The query is also enriched with genres and keywords from the user's watch history, so taste signals from past movies bias retrieval toward similar films.
+**Hard filters:**
+- **Runtime** — "under 90 mins", "at least 2 hours", etc. are parsed and applied before scoring
+- **Nationality** — "Korean movie", "Iranian film", etc. restricts the pool to matching productions
 
-**Negation parsing**: phrases like "no thriller", "without horror", "don't want romance" are detected, the negated words are removed from the TF-IDF query (so they don't accidentally boost the wrong movies), and the corresponding genres receive the hard −10 penalty.
+**Negation parsing** detects "no thriller", "without horror", "don't want romance" and applies both query cleanup and genre penalties.
 
-**Nationality expansion**: adjectives like "Korean", "Japanese", "French" are mapped to their country names ("korea", "japan", "france") so country-based queries correctly match the `production_countries` field.
+The top **15 candidates** are retrieved; the top **2** are sent to the LLM.
 
-The top **15 candidates** are retrieved; the top **2** are sent to the LLM (optimized for context limits).
+### 2. TMDB Enrichment
+Director, top 3 cast members, and tagline are fetched from the TMDB API in parallel (8 threads, 4s timeout) for the top 8 candidates, giving the LLM richer context for more specific descriptions.
 
-### Surprise / Gibberish Detection
-If the user's input contains no recognisable movie-related words (gibberish, random characters, or a completely vague prompt), the system enters **surprise mode**: the 15 candidates are shuffled and a random 5 are shown to the LLM, which is told "Surprise me — pick any movie you think is worth watching tonight." The description is also prefixed with a phrase like "Since you're not sure what to watch —" so the user understands why the pick feels unexpected.
+### 3. LLM Selection & Description
+`gemma4:31b-cloud` via Ollama Cloud receives the top 2 candidates and writes a pitch in "text a friend" style — vivid, direct, and personal. The LLM is instructed to mention the title naturally, reference one specific scene or feeling, and avoid review-site clichés.
 
-The known-preference vocabulary covers mood words (`cry`, `shock`, `heartbreaking`, `twist`, …), nationality adjectives, genre names, and common descriptive terms. This prevents natural phrasings like "something that will shock me" or "makes me cry" from accidentally triggering surprise mode.
+JSON is extracted via regex (the `format="json"` parameter produces empty responses with this model).
 
-### TMDB API Enrichment
-For the top 8 candidates, we fetch **director, top 3 cast members, and tagline** from the TMDB API in parallel (8 threads, 4s timeout each). This gives the LLM richer context to write specific, compelling descriptions that reference real actors and directors. The enrichment runs concurrently with the LLM call to avoid adding latency.
+### 4. Surprise Mode
+If the input contains no recognizable movie-related words (gibberish, vague non-query), the 15 candidates are shuffled and 2 random ones are sent to the LLM with the prompt "Surprise me". The description is prefixed with a phrase like "Not sure what you're in the mood for?" so the recommendation feels intentional.
 
-### LLM Selection & Description
-`gemma4:31b-cloud` via Ollama Cloud receives the top 2 candidates with their title, year, and genres. The prompt:
-- Asks the LLM to pick the best match and write a description that makes the user *need* to watch it tonight
-- Instructs it to mention the movie title naturally, by name
-- Tells it to interpret the user's mood rather than echoing it back robotically
-- Asks for one vivid scene, feeling, or character moment — not a plot summary
-- Enforces a "text a friend" style: direct and personal, no "critically acclaimed" or review-site clichés
-- Bans meta-commentary and reasoning leakage outside the JSON
-- **Match Awareness**: If the library lacks a perfect match (e.g., no "Iranian Comedy" exists), the LLM is nudged to acknowledge the gap naturally in its pitch.
+### 5. Safety & Reliability
+- Watch history is excluded from candidates before scoring
+- `tmdb_id` is validated against the candidate set; falls back to top-scored candidate if invalid
+- 3-attempt retry loop for transient LLM errors
+- Hard 17-second timeout on the LLM call (fits within the 20s requirement)
+- Post-processing appends runtime or match caveat if the LLM omits them
+- Fallback description generated locally if the LLM returns nothing
 
-JSON is extracted via regex from the response (`format="json"` causes empty responses with this model). The `reasoning` key is stripped if present.
-
-### Safety & Reliability
-- Watch history titles are resolved to TMDB IDs at the start of `get_recommendation` (case-insensitive title lookup), then excluded from the candidate pool before scoring; the LLM never recommends a film the user has already seen
-- After LLM responds, `tmdb_id` is validated against the candidate set; fallback to top-scored candidate if invalid or null
-- **Transient Error Resilience**: Includes a 3-attempt retry loop for the LLM call to handle "prompt too long" or timeout errors from the server.
-- **20-Second Guarantee**: Hard 17-second timeout for the LLM future ensures the entire pipeline finishes within the 20s requirement.
-- **Safety Net**: If the LLM misses a requested runtime or fails to acknowledge a poor match, a post-processing layer automatically prepends the caveat or appends the duration.
-- **Fallback Content**: If the LLM returns no description, a template fallback is generated locally using the movie's tagline and overview.
-
----
-
-## Evaluation Strategy
-
-We use **LLM-as-a-judge** via `evaluate.py`: after generating each recommendation, a second LLM call scores it on two dimensions (1–5):
-1. **Relevance** — does the movie actually match what the user asked for?
-2. **Persuasiveness** — would the description make you want to watch it?
-
-We ran the recommender against 5 diverse preference prompts (sci-fi twist, feel-good comedy, dark thriller, epic fantasy, family drama) and iterated on prompt wording, scoring weights, and description style based on the scores. We also manually verified edge cases: negations ("no thriller"), vague requests ("something good"), gibberish input, empty watch history, and genre-specific preferences.
-
-```bash
-python evaluate.py   # runs all test cases and prints scores
-```
-
----
-
-## Code Guide
+## 📁 Project Structure
 
 | File | Purpose |
 |---|---|
-| `llm.py` | Main implementation — multi-signal scoring, TMDB enrichment, `get_recommendation()`, prompt |
-| `evaluate.py` | LLM-as-a-judge eval script — scores recommendations on relevance + persuasion |
-| `test_retrieval.py` | Fast retrieval regression tests — 16 cases, no API calls needed |
-| `test.py` | Grader test suite — run before submitting |
+| `llm.py` | Core implementation — retrieval, scoring, TMDB enrichment, `get_recommendation()` |
+| `evaluate.py` | LLM-as-a-judge eval — scores recommendations on relevance + persuasion (1–5) |
+| `test_retrieval.py` | Retrieval regression tests — 16 cases, no API calls needed |
+| `test.py` | Grader compliance tests — run before submitting |
+| `tmdb_top1000_movies.csv` | Movie database (TMDB top 1000) |
 | `requirements.txt` | Python dependencies |
-| `tmdb_top1000_movies.csv` | Movie database |
 
-### Running locally
+## ⚙️ Setup
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate       # Windows
+source .venv/bin/activate        # macOS/Linux
+.venv\Scripts\activate           # Windows
 pip install -r requirements.txt
 ```
 
+## 🔑 Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `OLLAMA_API_KEY` | ✅ Yes | Ollama Cloud API key |
+| `TMDB_API_KEY` | ⬜ Optional | TMDB API key for director/cast/tagline enrichment (degrades gracefully if absent) |
+
+Copy `.env.example` to `.env` and fill in your keys, or export them directly:
+
 ```bash
 export OLLAMA_API_KEY=your_key_here
-export TMDB_API_KEY=your_tmdb_key_here   # optional but improves descriptions
-
-python llm.py --preferences "I want a funny feel-good movie" --history "The Dark Knight"
-python test_retrieval.py   # fast scoring tests, no API needed
-python test.py             # grader compliance check
-python evaluate.py         # LLM-as-a-judge quality scores
+export TMDB_API_KEY=your_tmdb_key_here
 ```
 
-### Environment variables
+## 🎬 Usage
 
-- `OLLAMA_API_KEY` — injected by grader at run time (required)
-- `TMDB_API_KEY` — TMDB API key for director/cast/tagline enrichment (optional; degrades gracefully if absent)
+```bash
+# Interactive CLI
+python llm.py
+
+# With arguments
+python llm.py --preferences "I want a funny feel-good movie" --history "The Dark Knight"
+
+# Fast retrieval tests (no API needed)
+python test_retrieval.py
+
+# Grader compliance check
+python test.py
+
+# LLM-as-a-judge quality evaluation
+python evaluate.py
+```
+
+## 🧪 Evaluation
+
+`evaluate.py` runs `get_recommendation()` against 5 diverse prompts and uses the same LLM to score each result on:
+
+1. **Relevance** (1–5) — does the movie match what the user asked for?
+2. **Persuasiveness** (1–5) — would the description make you want to watch it?
+
+Test cases cover: sci-fi with twists, feel-good comedy, dark psychological thriller (with watch history), epic fantasy, and family drama.
+
+## 🛠 Tech Stack
+
+- Python
+- pandas, scikit-learn
+- Ollama (`gemma4:31b-cloud`)
+- TMDB API
+- python-dotenv
