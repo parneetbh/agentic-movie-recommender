@@ -68,7 +68,7 @@ pip install -r requirements.txt
 | `OLLAMA_API_KEY` | ✅ Yes | Ollama Cloud API key |
 | `TMDB_API_KEY` | ⬜ Optional | TMDB API key for director/cast/tagline enrichment (degrades gracefully if absent) |
 
-Copy `.env.example` to `.env` and fill in your keys, or export them directly:
+Export your keys directly:
 
 ```bash
 export OLLAMA_API_KEY=your_key_here
